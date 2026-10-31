@@ -17,6 +17,21 @@ the control room is React. Everything runs on three VMs in my own OpenStack clou
 This repo is the starting point: it explains how the pieces fit together and links to the
 six repositories that make up the system.
 
+## Tech stack
+
+| Area | What I used |
+|---|---|
+| Ingest gateway | Rust (2021 edition), axum 0.8, tokio, sqlx, redis-rs, arc-swap, dashmap, tracing, prometheus |
+| Alarm workers | Python 3 with asyncio, asyncpg, redis-py, aiohttp, prometheus-client, OpenTelemetry SDK |
+| Plan writing | Ollama running `llama3:8b` locally (`phi3:mini` compared in the bake-off) |
+| Control room | React 18, Vite 5, Recharts; backend in Python with aiohttp, Server-Sent Events, bcrypt |
+| Databases | PostgreSQL 16 with TimescaleDB (hypertables, compression, continuous aggregates), Redis (Streams, consumer groups, pub/sub) |
+| Infrastructure | OpenStack (Kolla-Ansible) on my home-lab server, Terraform 1.7+ with the OpenStack provider, cloud-init, Ubuntu 24.04 |
+| Configuration | Ansible with the `community.postgresql` collection, SQL migrations, systemd units |
+| Networking | Cloudflare Tunnel, Caddy 2, OpenStack security groups |
+| Monitoring | Prometheus, node exporter, OpenTelemetry collector, Grafana 11 |
+| Testing | a Python load simulator (10,000 readings a second) and scripted chaos drills in Bash |
+
 ## How it works
 
 ```mermaid
@@ -70,31 +85,31 @@ flowchart TB
     UI --> OPS
 ```
 
-**Ingest.** Sensors post batches of readings to the Rust gateway, which checks each reading
+Ingest. Sensors post batches of readings to the Rust gateway, which checks each reading
 against that sensor's thresholds. Every reading goes down the warm lane, where it's batched
 and written to TimescaleDB with binary `COPY`; under heavy load this lane is allowed to
 drop bulk readings, and it reports when it does. Readings that break a threshold also go
 down the hot lane into a Redis Stream, and those are never dropped. If Redis is down they
 spill to a file on disk and get replayed in order once it's back.
 
-**Episodes.** The Python workers read the stream through a Redis consumer group, so every
+Episodes. The Python workers read the stream through a Redis consumer group, so every
 violation is processed at least once, and anything that keeps failing ends up in a
 dead-letter queue instead of blocking the rest. Thousands of violations from one sensor fold
 into a single episode that goes from open to escalated to cleared. The database only allows
 one live episode per sensor, so I can run as many workers as I want.
 
-**Plans.** For each episode a worker describes the hazard using the plant's layout: the
+Plans. For each episode a worker describes the hazard using the plant's layout: the
 zone, the zones next to it, and the assets and isolation points nearby. If an identical
 hazard already has a plan, it reuses that one, which is where most plans come from. If not,
 it asks the local LLM (`llama3:8b`). If the LLM is down, a circuit breaker switches to a
 simple rulebook so there's always a plan.
 
-**Control room.** A small Python service relays the live violations to the browser over
+Control room. A small Python service relays the live violations to the browser over
 Server-Sent Events and serves the plant layout, episodes, plans and stats to the React UI.
 Anyone can watch; operator sign-in is in place for the actions I'm adding next, such as
 acknowledging alarms.
 
-**Observability.** Prometheus metrics, OpenTelemetry traces that follow a single violation
+Observability. Prometheus metrics, OpenTelemetry traces that follow a single violation
 from the stream to its plan, a Grafana dashboard, and chaos drills where I break things on
 purpose (kill a worker, stop the LLM, interrupt Redis, send poison messages) to check that
 the system recovers.
